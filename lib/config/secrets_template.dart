@@ -1,3 +1,3 @@
-// Template: copia este archivo a secrets.dart y pone tus tokens reales
+// Template: copia este archivo a secrets.dart y completa tus tokens
+// secrets.dart NO se sube a Git (.gitignore)
 const String mapboxSecretToken = '';
-const String supabaseSecretKey = '';
