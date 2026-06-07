@@ -42,14 +42,14 @@ class AuthService extends ChangeNotifier {
   Future<void> loginWithGoogle() async {
     await Supabase.instance.client.auth.signInWithOAuth(
       OAuthProvider.google,
-      redirectTo: 'com.ridechile.app://callback',
+      redirectTo: 'com.ridechile.ridechile_app://callback',
     );
   }
 
   Future<void> loginWithApple() async {
     await Supabase.instance.client.auth.signInWithOAuth(
       OAuthProvider.apple,
-      redirectTo: 'com.ridechile.app://callback',
+      redirectTo: 'com.ridechile.ridechile_app://callback',
     );
   }
 

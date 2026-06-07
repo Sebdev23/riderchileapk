@@ -35,6 +35,7 @@ class _MapScreenState extends State<MapScreen> {
   final LocationService _loc = LocationService();
   final ImagePicker _picker = ImagePicker();
   LatLng _center = const LatLng(-33.4489, -70.6693);
+  LatLng? _userLocation;
   bool _ready = false;
   int _tab = 0;
   final List<String> _photoPaths = [];
@@ -85,6 +86,7 @@ class _MapScreenState extends State<MapScreen> {
       if (!mounted) return;
       setState(() {
         _center = LatLng(p.latitude, p.longitude);
+        _userLocation = LatLng(p.latitude, p.longitude);
         _ready = true;
       });
       _mapCtrl.move(_center, 14);
@@ -113,8 +115,11 @@ class _MapScreenState extends State<MapScreen> {
           if (!_ready) const Center(child: CircularProgressIndicator()),
           if (rec.isRecording) _recordingOverlay(rec, bottom),
           if (!rec.isRecording) ...[
-            _topBar(),
-            _poiFilter(),
+            SafeArea(child: Column(children: [
+              _topBarContent(),
+              _poiFilterRow(),
+              if (_weather != null) _weatherBadge(),
+            ])),
             _alertSheet(alerts, bottom),
             _fabColumn(auth, rec, bottom),
           ],
@@ -159,11 +164,32 @@ class _MapScreenState extends State<MapScreen> {
             ),
         ]),
         MarkerLayer(markers: [
+          if (_userLocation != null) _userDotMarker(),
           for (final a in alerts.alerts) _alertMarker(a),
           for (final t in trails.trails.where((t) => t.coordinates.isNotEmpty)) _trailMarker(t),
           for (final p in context.watch<PoiService>().pois) _poiMarker(p),
         ]),
       ],
+    );
+  }
+
+  Marker _userDotMarker() {
+    return Marker(
+      point: _userLocation!,
+      width: 20, height: 20,
+      child: Container(
+        decoration: BoxDecoration(
+          color: AppTheme.blue.withValues(alpha: 0.3),
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 2),
+        ),
+        child: Center(
+          child: Container(
+            width: 8, height: 8,
+            decoration: const BoxDecoration(color: AppTheme.blue, shape: BoxShape.circle),
+          ),
+        ),
+      ),
     );
   }
 
@@ -199,31 +225,23 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  Widget _topBar() {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
+  Widget _topBarContent() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        decoration: BoxDecoration(
+          color: AppTheme.surface,
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
+        ),
+        child: Row(
           children: [
-            Container(
-              height: 48,
-              decoration: BoxDecoration(
-                color: AppTheme.surface,
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
-              ),
-              child: Row(
-                children: [
-                  IconButton(icon: const Icon(Icons.menu, size: 22), onPressed: () {}),
-                  const Expanded(
-                    child: Text('RideChile MTB', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
-                  ),
-                  IconButton(icon: const Icon(Icons.layers, size: 22), onPressed: _showLayerPicker),
-                  IconButton(icon: const Icon(Icons.my_location, size: 22), onPressed: _locate),
-                ],
-              ),
+            IconButton(icon: const Icon(Icons.layers, size: 20), onPressed: _showLayerPicker, padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36)),
+            const Expanded(
+              child: Text('RideChile MTB', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
             ),
-            if (_weather != null) _weatherBadge(),
+            IconButton(icon: const Icon(Icons.my_location, size: 20), onPressed: _locate, padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36)),
           ],
         ),
       ),
@@ -793,13 +811,12 @@ class _MapScreenState extends State<MapScreen> {
     ));
   }
 
-  Widget _poiFilter() {
+  Widget _poiFilterRow() {
     final poi = context.watch<PoiService>();
-    return SafeArea(
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        child: Row(children: [
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Row(children: [
           _poiChip('Todos', null, poi.activeCategory == null),
           _poiChip('Emergencia', 'emergency', poi.activeCategory == 'emergency'),
           _poiChip('Comida', 'food', poi.activeCategory == 'food'),
@@ -815,7 +832,6 @@ class _MapScreenState extends State<MapScreen> {
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const EmergencyScreen())),
           ),
         ]),
-      ),
     );
   }
 
