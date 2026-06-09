@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -16,7 +17,7 @@ import '../services/recording_service.dart';
 import '../services/trail_service.dart';
 import '../services/poi_service.dart';
 import '../services/weather_service.dart';
-import '../widgets/elevation_profile.dart';
+import '../services/presence_service.dart';
 import 'auth_screen.dart';
 import 'trails_list_screen.dart';
 import 'profile_screen.dart';
@@ -30,7 +31,7 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final MapController _mapCtrl = MapController();
   final LocationService _loc = LocationService();
   final ImagePicker _picker = ImagePicker();
@@ -42,8 +43,10 @@ class _MapScreenState extends State<MapScreen> {
   final WeatherService _weatherService = WeatherService();
   WeatherInfo? _weather;
   String _mapLayer = 'mapbox';
+  Timer? _presenceTimer;
+  int _prevAlertCount = 0;
 
-  static Map<String, Map<String, String>> get _layers => {
+  static final Map<String, Map<String, String>> _layers = {
     'osm': {
       'name': 'OpenStreetMap',
       'url': 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -69,7 +72,23 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _init();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final presence = context.read<PresenceService>();
+    if (state == AppLifecycleState.paused) {
+      presence.pause();
+    } else if (state == AppLifecycleState.resumed) {
+      if (context.read<AuthService>().isAuthenticated) {
+        presence.resume();
+      }
+      if (_userLocation != null) {
+        context.read<AlertService>().fetchNearby(_userLocation!.latitude, _userLocation!.longitude);
+      }
+    }
   }
 
   Future<void> _init() async {
@@ -78,6 +97,49 @@ class _MapScreenState extends State<MapScreen> {
       context.read<TrailService>().fetchTrails(),
       context.read<PoiService>().fetchNearby(_center.latitude, _center.longitude),
     ]);
+    _startPeriodicUpdates();
+  }
+
+  void _startPeriodicUpdates() {
+    final auth = context.read<AuthService>();
+    final presence = context.read<PresenceService>();
+    if (auth.isAuthenticated && _userLocation != null) {
+      presence.start(_userLocation!.latitude, _userLocation!.longitude);
+    }
+    _prevAlertCount = context.read<AlertService>().alerts.length;
+    _presenceTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _periodicTick();
+    });
+  }
+
+  Future<void> _periodicTick() async {
+    if (!mounted) return;
+    try {
+      final p = await _loc.getCurrentPosition();
+      if (!mounted) return;
+      setState(() {
+        _center = LatLng(p.latitude, p.longitude);
+        _userLocation = LatLng(p.latitude, p.longitude);
+      });
+      final presence = context.read<PresenceService>();
+      presence.updatePosition(p.latitude, p.longitude);
+      if (!presence.isActive && context.read<AuthService>().isAuthenticated) {
+        presence.start(p.latitude, p.longitude);
+      }
+      final alertService = context.read<AlertService>();
+      await alertService.fetchNearby(p.latitude, p.longitude);
+      if (mounted && alertService.alerts.length > _prevAlertCount && _prevAlertCount >= 0) {
+        final latest = alertService.alerts.first;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('${latest.typeIcon} Nueva alerta: ${latest.typeLabel} - ${latest.description}'),
+          backgroundColor: AppTheme.warning,
+          duration: const Duration(seconds: 5),
+        ));
+      }
+      _prevAlertCount = alertService.alerts.length;
+    } catch (e) {
+      debugPrint('_periodicTick error: $e');
+    }
   }
 
   Future<void> _locate() async {
@@ -96,8 +158,19 @@ class _MapScreenState extends State<MapScreen> {
       if (mounted) {
         setState(() => _ready = true);
         context.read<AlertService>().fetchNearby(_center.latitude, _center.longitude);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No se pudo obtener ubicacion. Mostrando vista general.'), duration: Duration(seconds: 3)),
+        );
       }
     }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _presenceTimer?.cancel();
+    context.read<PresenceService>().stop();
+    super.dispose();
   }
 
   @override
@@ -107,6 +180,7 @@ class _MapScreenState extends State<MapScreen> {
     final rec = context.watch<RecordingService>();
     final auth = context.watch<AuthService>();
     final bottom = MediaQuery.of(context).padding.bottom;
+    final navBarH = 56.0 + bottom;
 
     return Scaffold(
       body: Stack(
@@ -120,8 +194,8 @@ class _MapScreenState extends State<MapScreen> {
               _poiFilterRow(),
               if (_weather != null) _weatherBadge(),
             ])),
-            _alertSheet(alerts, bottom),
-            _fabColumn(auth, rec, bottom),
+            _alertSheet(alerts, navBarH),
+            _fabColumn(auth, rec, navBarH, alerts),
           ],
         ],
       ),
@@ -145,7 +219,7 @@ class _MapScreenState extends State<MapScreen> {
       children: [
               TileLayer(
                 urlTemplate: _layers[_mapLayer]!['url']!,
-                userAgentPackageName: 'com.ridechile.app',
+                userAgentPackageName: 'com.MRIDER.app',
               ),
         PolylineLayer(polylines: [
           for (final t in trails.trails.where((t) => t.coordinates.length >= 2))
@@ -165,6 +239,7 @@ class _MapScreenState extends State<MapScreen> {
         ]),
         MarkerLayer(markers: [
           if (_userLocation != null) _userDotMarker(),
+          for (final u in context.watch<PresenceService>().nearbyUsers) _presenceMarker(u),
           for (final a in alerts.alerts) _alertMarker(a),
           for (final t in trails.trails.where((t) => t.coordinates.isNotEmpty)) _trailMarker(t),
           for (final p in context.watch<PoiService>().pois) _poiMarker(p),
@@ -192,6 +267,37 @@ class _MapScreenState extends State<MapScreen> {
       ),
     );
   }
+
+  Marker _presenceMarker(PresenceUser u) => Marker(
+        point: LatLng(u.lat, u.lon),
+        width: 70, height: 44,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 22, height: 22,
+              decoration: BoxDecoration(
+                color: AppTheme.success.withValues(alpha: 0.85),
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 2),
+                boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 4)],
+              ),
+              child: const Icon(Icons.pedal_bike, size: 14, color: Colors.white),
+            ),
+            const SizedBox(height: 2),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: Colors.black87,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(u.displayName,
+                style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600),
+                overflow: TextOverflow.ellipsis),
+            ),
+          ],
+        ),
+      );
 
   Marker _alertMarker(Alert a) => Marker(
         point: LatLng(a.lat, a.lon),
@@ -238,9 +344,11 @@ class _MapScreenState extends State<MapScreen> {
         child: Row(
           children: [
             IconButton(icon: const Icon(Icons.layers, size: 20), onPressed: _showLayerPicker, padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36)),
-            const Expanded(
-              child: Text('RideChile MTB', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-            ),
+            Expanded(child: GestureDetector(
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const TrailsListScreen())),
+              child: const Text('MRIDER', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, letterSpacing: 1)),
+            )),
+            IconButton(icon: const Icon(Icons.add_location, size: 20), onPressed: _showAddPoi, padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36)),
             IconButton(icon: const Icon(Icons.my_location, size: 20), onPressed: _locate, padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth: 36, minHeight: 36)),
           ],
         ),
@@ -270,13 +378,13 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  Widget _alertSheet(AlertService alerts, double bottom) {
+  Widget _alertSheet(AlertService alerts, double navBarH) {
     if (alerts.alerts.isEmpty) return const SizedBox.shrink();
 
     return Positioned(
       left: 0, right: 0, bottom: 0,
       child: Container(
-        padding: EdgeInsets.only(bottom: bottom + 24),
+        padding: EdgeInsets.only(bottom: navBarH),
         decoration: const BoxDecoration(
           color: AppTheme.background,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -284,7 +392,6 @@ class _MapScreenState extends State<MapScreen> {
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Center(
               child: Container(
@@ -294,17 +401,15 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-              child: Row(
-                children: [
-                  const Text('Alertas cercanas', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  const Spacer(),
-                  Text('${alerts.alerts.length}', style: TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
-                ],
-              ),
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              child: Row(children: [
+                const Text('Alertas cercanas', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                const Spacer(),
+                Text('${alerts.alerts.length}', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              ]),
             ),
             SizedBox(
-              height: 120,
+              height: 90,
               child: ListView.builder(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -314,29 +419,25 @@ class _MapScreenState extends State<MapScreen> {
                   return GestureDetector(
                     onTap: () => _showAlertDetail(a),
                     child: Container(
-                      width: 220,
+                      width: 200,
                       margin: const EdgeInsets.only(right: 8),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: AppTheme.card,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(color: AppTheme.card, borderRadius: BorderRadius.circular(10)),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(children: [
-                            Text(a.typeIcon, style: const TextStyle(fontSize: 20)),
-                            const SizedBox(width: 8),
-                            Expanded(child: Text(a.typeLabel, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14))),
-                            Icon(Icons.verified, size: 14, color: a.verifiedCount > 0 ? AppTheme.success : Colors.grey),
-                            const SizedBox(width: 2),
-                            Text('${a.verifiedCount}', style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                            Text(a.typeIcon, style: const TextStyle(fontSize: 16)),
+                            const SizedBox(width: 6),
+                            Expanded(child: Text(a.typeLabel, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12))),
+                            if (a.verifiedCount > 0) ...[
+                              Icon(Icons.verified, size: 12, color: AppTheme.success),
+                              const SizedBox(width: 2),
+                              Text('${a.verifiedCount}', style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                            ],
                           ]),
-                          const SizedBox(height: 6),
-                          Expanded(
-                            child: Text(a.description, style: TextStyle(color: AppTheme.textSecondary, fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis),
-                          ),
-                          Text(_fmtDate(a.createdAt), style: const TextStyle(color: Colors.grey, fontSize: 10)),
+                          const SizedBox(height: 4),
+                          Expanded(child: Text(a.description, style: const TextStyle(color: Colors.grey, fontSize: 11), maxLines: 2, overflow: TextOverflow.ellipsis)),
                         ],
                       ),
                     ),
@@ -431,26 +532,13 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _pulsingDot() {
-    return TweenAnimationBuilder<double>(
-      tween: Tween(begin: 0.4, end: 1.0),
-      duration: const Duration(milliseconds: 800),
-      builder: (_, value, child) {
-        return Container(
-          width: 12, height: 12,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: AppTheme.primary.withValues(alpha: value),
-          ),
-        );
-      },
-      onEnd: () => setState(() {}),
-    );
+    return const _PulsingDotWidget();
   }
 
-  Widget _fabColumn(AuthService auth, RecordingService rec, double bottom) {
+  Widget _fabColumn(AuthService auth, RecordingService rec, double navBarH, AlertService alerts) {
     return Positioned(
       right: 16,
-      bottom: (rec.isRecording) ? 200 : (context.watch<AlertService>().alerts.isNotEmpty ? 170 : bottom + 16),
+      bottom: alerts.alerts.isNotEmpty ? 120 : navBarH + 16,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -551,8 +639,8 @@ class _MapScreenState extends State<MapScreen> {
       context: context,
       backgroundColor: AppTheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(20),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(20, 20, 20, 20 + MediaQuery.of(ctx).padding.bottom),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -563,13 +651,72 @@ class _MapScreenState extends State<MapScreen> {
             ..._layers.entries.map((e) => ListTile(
               leading: Icon(e.key == _mapLayer ? Icons.check_circle : Icons.circle_outlined, color: e.key == _mapLayer ? AppTheme.primary : Colors.grey),
               title: Text(e.value['name']!),
-              subtitle: e.key == 'outdoors' ? const Text('Requiere API key Thunderforest', style: TextStyle(fontSize: 11, color: Colors.orange)) : null,
-              onTap: () {
-                setState(() => _mapLayer = e.key);
-                Navigator.pop(context);
-              },
+              onTap: () { setState(() => _mapLayer = e.key); Navigator.pop(context); },
             )),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _showAddPoi() {
+    String cat = 'food';
+    final nameCtrl = TextEditingController();
+    final descCtrl = TextEditingController();
+    final phoneCtrl = TextEditingController();
+    final addrCtrl = TextEditingController();
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppTheme.surface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) => Padding(
+          padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 20),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 32, height: 4, decoration: BoxDecoration(color: Colors.grey[600], borderRadius: BorderRadius.circular(2))),
+            const SizedBox(height: 16),
+            const Text('Agregar Servicio', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: cat,
+              items: const [
+                DropdownMenuItem(value: 'food', child: Text('Comida')),
+                DropdownMenuItem(value: 'workshop', child: Text('Taller')),
+                DropdownMenuItem(value: 'hydration', child: Text('Agua')),
+                DropdownMenuItem(value: 'parking', child: Text('Estacionamiento')),
+                DropdownMenuItem(value: 'shop', child: Text('Tienda')),
+              ],
+              onChanged: (v) => setSt(() => cat = v!),
+              decoration: const InputDecoration(labelText: 'Categoria'),
+            ),
+            const SizedBox(height: 8),
+            TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Nombre')),
+            const SizedBox(height: 8),
+            TextField(controller: descCtrl, decoration: const InputDecoration(labelText: 'Descripcion (opcional)')),
+            const SizedBox(height: 8),
+            TextField(controller: phoneCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Telefono (opcional)')),
+            const SizedBox(height: 8),
+            TextField(controller: addrCtrl, decoration: const InputDecoration(labelText: 'Direccion (opcional)')),
+            const SizedBox(height: 16),
+            SizedBox(width: double.infinity, height: 48,
+              child: ElevatedButton(onPressed: () async {
+                if (nameCtrl.text.trim().isEmpty) { ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Ingresa un nombre'))); return; }
+                Navigator.pop(ctx);
+                await context.read<PoiService>().createPoi(
+                  cat, nameCtrl.text.trim(), descCtrl.text.trim().isEmpty ? null : descCtrl.text.trim(),
+                  phoneCtrl.text.trim().isEmpty ? null : phoneCtrl.text.trim(),
+                  addrCtrl.text.trim().isEmpty ? null : addrCtrl.text.trim(),
+                  _center.latitude, _center.longitude,
+                );
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Servicio agregado!'), backgroundColor: AppTheme.success));
+                  context.read<PoiService>().fetchNearby(_center.latitude, _center.longitude);
+                }
+              }, child: const Text('Guardar')),
+            ),
+          ]),
         ),
       ),
     );
@@ -624,7 +771,7 @@ class _MapScreenState extends State<MapScreen> {
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSt) => Padding(
-          padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 20),
+          padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 20),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -688,41 +835,56 @@ class _MapScreenState extends State<MapScreen> {
 
   Future<void> _checkSimilarAndSave(RecordingService rec, String name, String disc, String diff) async {
     final trailService = context.read<TrailService>();
-    final similar = await trailService.findSimilar(_center.latitude, _center.longitude, name: name);
+    try {
+      final similar = await trailService.findSimilar(_center.latitude, _center.longitude, name: name);
 
-    if (similar.isNotEmpty && mounted) {
-      final choice = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Ruta similar encontrada'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Ya existe "${similar.first.name}" en esta zona (${similar.first.lengthKm?.toStringAsFixed(1) ?? "?"} km).'),
-              const SizedBox(height: 8),
-              const Text('Que quieres hacer?', style: TextStyle(fontWeight: FontWeight.w600)),
+      if (similar.isNotEmpty && mounted) {
+        final choice = await showDialog<String>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Ruta similar encontrada'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Ya existe "${similar.first.name}" en esta zona (${similar.first.lengthKm?.toStringAsFixed(1) ?? "?"} km).'),
+                const SizedBox(height: 8),
+                const Text('Que quieres hacer?', style: TextStyle(fontWeight: FontWeight.w600)),
+              ],
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, 'new'), child: const Text('Crear nueva')),
+              ElevatedButton(onPressed: () => Navigator.pop(ctx, 'ride'), child: Text('Solo registrar que la hice (mejora ${similar.first.name})')),
             ],
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, 'new'), child: const Text('Crear nueva')),
-            ElevatedButton(onPressed: () => Navigator.pop(ctx, 'ride'), child: Text('Solo registrar que la hice (mejora ${similar.first.name})')),
-          ],
-        ),
-      );
+        );
 
-      if (choice == 'ride' && mounted) {
-        final wkt = rec.generateWkt();
-        await trailService.uploadTrail(name: name, discipline: disc, difficulty: diff, gpxContent: wkt, canonicalTrailId: similar.first.id);
-        _navigateToSummary(name, disc, diff, rec);
-        return;
+        if (choice == 'ride' && mounted) {
+          final wkt = rec.generateWkt();
+          await trailService.uploadTrail(name: name, discipline: disc, difficulty: diff, gpxContent: wkt, canonicalTrailId: similar.first.id);
+          _navigateToSummary(name, disc, diff, rec);
+          return;
+        }
+        if (choice != 'new') return;
       }
-      if (choice != 'new') return;
+    } catch (e) {
+      debugPrint('Error checking similar: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al verificar rutas: $e'), backgroundColor: Colors.red));
+      }
+      return;
     }
 
-    final wkt = rec.generateWkt();
-    await trailService.uploadTrail(name: name, discipline: disc, difficulty: diff, gpxContent: wkt);
-    if (mounted) _navigateToSummary(name, disc, diff, rec);
+    try {
+      final wkt = rec.generateWkt();
+      await trailService.uploadTrail(name: name, discipline: disc, difficulty: diff, gpxContent: wkt);
+      if (mounted) _navigateToSummary(name, disc, diff, rec);
+    } catch (e) {
+      debugPrint('Error saving trail: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al guardar ruta: $e'), backgroundColor: Colors.red));
+      }
+    }
   }
 
   void _navigateToSummary(String name, String disc, String diff, RecordingService rec) {
@@ -752,7 +914,7 @@ class _MapScreenState extends State<MapScreen> {
         final desc = TextEditingController();
         return StatefulBuilder(
           builder: (ctx, setSt) => Padding(
-            padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 20),
+            padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 20),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -877,8 +1039,8 @@ class _MapScreenState extends State<MapScreen> {
       context: context,
       backgroundColor: AppTheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(24),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(24, 24, 24, 24 + MediaQuery.of(ctx).padding.bottom),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -929,8 +1091,8 @@ class _MapScreenState extends State<MapScreen> {
       context: context,
       backgroundColor: AppTheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(24),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(24, 24, 24, 24 + MediaQuery.of(ctx).padding.bottom),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -972,5 +1134,47 @@ class _MapScreenState extends State<MapScreen> {
     final m = (d.inMinutes % 60).toString().padLeft(2, '0');
     final s = (d.inSeconds % 60).toString().padLeft(2, '0');
     return '$h:$m:$s';
+  }
+}
+
+class _PulsingDotWidget extends StatefulWidget {
+  const _PulsingDotWidget();
+
+  @override
+  State<_PulsingDotWidget> createState() => _PulsingDotWidgetState();
+}
+
+class _PulsingDotWidgetState extends State<_PulsingDotWidget> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    )..repeat(reverse: true);
+    _animation = Tween(begin: 0.4, end: 1.0).animate(_controller);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (_, child) => Container(
+        width: 12, height: 12,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: AppTheme.primary.withValues(alpha: _animation.value),
+        ),
+      ),
+    );
   }
 }

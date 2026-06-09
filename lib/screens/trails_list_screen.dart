@@ -4,7 +4,6 @@ import '../config/theme.dart';
 import '../models/trail.dart';
 import '../services/trail_service.dart';
 import '../services/favorites_service.dart';
-import '../widgets/elevation_profile.dart';
 import 'trail_upload_screen.dart';
 
 class TrailsListScreen extends StatefulWidget {
@@ -24,14 +23,25 @@ class _TrailsListScreenState extends State<TrailsListScreen> {
   void initState() {
     super.initState();
     _favs.load().then((_) {
-      Future.microtask(() => context.read<TrailService>().fetchTrails());
+      if (mounted) {
+        context.read<TrailService>().fetchTrails();
+      }
+    }).catchError((e) {
+      debugPrint('Failed to load favorites: $e');
+      if (mounted) {
+        context.read<TrailService>().fetchTrails();
+      }
     });
   }
 
   @override
   Widget build(BuildContext context) {
     final ts = context.watch<TrailService>();
-    final trails = _favoritesOnly ? ts.trails.where((t) => _favs.isFavorite(t.id)).toList() : ts.trails;
+    final query = _searchCtrl.text.toLowerCase();
+    var trails = _favoritesOnly ? ts.trails.where((t) => _favs.isFavorite(t.id)).toList() : ts.trails;
+    if (query.isNotEmpty) {
+      trails = trails.where((t) => t.name.toLowerCase().contains(query)).toList();
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -114,8 +124,6 @@ class _TrailsListScreenState extends State<TrailsListScreen> {
 
   Widget _trailCard(Trail t) {
     final isFav = _favs.isFavorite(t.id);
-    final query = _searchCtrl.text.toLowerCase();
-    if (query.isNotEmpty && !t.name.toLowerCase().contains(query)) return const SizedBox.shrink();
 
     return GestureDetector(
       onTap: () => _showDetail(t),
@@ -175,8 +183,8 @@ class _TrailsListScreenState extends State<TrailsListScreen> {
       context: context,
       backgroundColor: AppTheme.surface,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(24),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(24, 24, 24, 24 + MediaQuery.of(ctx).padding.bottom),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: _disciplineColor(t.discipline), borderRadius: BorderRadius.circular(8)), child: Text(t.discipline, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700))),
