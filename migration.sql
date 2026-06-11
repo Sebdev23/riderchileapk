@@ -42,6 +42,41 @@ CREATE OR REPLACE FUNCTION public.nearby_user_locations(
   LIMIT limit_count;
 $$ LANGUAGE sql STABLE SECURITY DEFINER;
 
+-- RPC para verificar/confirmar alertas (tipo Waze "Yo tambien lo vi")
+CREATE OR REPLACE FUNCTION public.verify_alert(alert_id uuid)
+RETURNS void AS $$
+BEGIN
+  UPDATE public.alerts SET verified_count = verified_count + 1 WHERE id = alert_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Columna para fotos en alertas
+ALTER TABLE public.alerts ADD COLUMN IF NOT EXISTS photo_url TEXT;
+
+-- Tabla de comentarios en rutas
+CREATE TABLE IF NOT EXISTS public.trail_comments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trail_id UUID REFERENCES public.trails(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  display_name TEXT NOT NULL,
+  text TEXT NOT NULL CHECK (char_length(text) <= 500),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.trail_comments ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "rls_tc_select" ON public.trail_comments;
+CREATE POLICY "rls_tc_select" ON public.trail_comments
+  FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "rls_tc_insert" ON public.trail_comments;
+CREATE POLICY "rls_tc_insert" ON public.trail_comments
+  FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "rls_tc_delete" ON public.trail_comments;
+CREATE POLICY "rls_tc_delete" ON public.trail_comments
+  FOR DELETE USING (auth.uid() = user_id);
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'user_locations') THEN
@@ -49,5 +84,8 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'alerts') THEN
     ALTER PUBLICATION supabase_realtime ADD TABLE public.alerts;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'trail_comments') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.trail_comments;
   END IF;
 END $$;

@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../config/theme.dart';
 import '../config/api_config.dart';
@@ -18,6 +20,7 @@ import '../services/trail_service.dart';
 import '../services/poi_service.dart';
 import '../services/weather_service.dart';
 import '../services/presence_service.dart';
+import '../services/user_settings_service.dart';
 import 'auth_screen.dart';
 import 'trails_list_screen.dart';
 import 'profile_screen.dart';
@@ -45,6 +48,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   String _mapLayer = 'mapbox';
   Timer? _presenceTimer;
   int _prevAlertCount = 0;
+  Color _userDotColor = AppTheme.blue;
 
   static final Map<String, Map<String, String>> _layers = {
     'osm': {
@@ -92,6 +96,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _init() async {
+    _userDotColor = await UserSettingsService.getDotColor();
     await Future.wait([
       _locate(),
       context.read<TrailService>().fetchTrails(),
@@ -251,19 +256,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   Marker _userDotMarker() {
     return Marker(
       point: _userLocation!,
-      width: 20, height: 20,
+      width: 30, height: 30,
       child: Container(
         decoration: BoxDecoration(
-          color: AppTheme.blue.withValues(alpha: 0.3),
+          color: _userDotColor.withValues(alpha: 0.85),
           shape: BoxShape.circle,
-          border: Border.all(color: Colors.white, width: 2),
+          border: Border.all(color: Colors.white, width: 2.5),
+          boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 4)],
         ),
-        child: Center(
-          child: Container(
-            width: 8, height: 8,
-            decoration: const BoxDecoration(color: AppTheme.blue, shape: BoxShape.circle),
-          ),
-        ),
+        child: const Icon(Icons.pedal_bike, size: 18, color: Colors.white),
       ),
     );
   }
@@ -912,6 +913,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       builder: (ctx) {
         String type = 'obstaculo';
         final desc = TextEditingController();
+        XFile? photoFile;
         return StatefulBuilder(
           builder: (ctx, setSt) => Padding(
             padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 20),
@@ -942,15 +944,25 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   maxLength: 500,
                   decoration: const InputDecoration(labelText: 'Descripcion', hintText: 'Describe lo que encontraste...'),
                 ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
+              const SizedBox(height: 16),
+              Row(children: [
+                Expanded(child: SizedBox(
                   height: 52,
                   child: ElevatedButton(
                     onPressed: () async {
                       if (desc.text.trim().length < 10) { ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Minimo 10 caracteres'))); return; }
                       Navigator.pop(ctx);
-                      final ok = await context.read<AlertService>().createAlert(type, desc.text.trim(), _center.latitude, _center.longitude);
+                      String? photoUrl;
+                      if (photoFile != null) {
+                        try {
+                          final fileName = '${DateTime.now().millisecondsSinceEpoch}.jpg';
+                          await Supabase.instance.client.storage.from('alerts').upload(fileName, File(photoFile!.path));
+                          photoUrl = Supabase.instance.client.storage.from('alerts').getPublicUrl(fileName);
+                        } catch (e) {
+                          debugPrint('Photo upload error: $e');
+                        }
+                      }
+                      final ok = await context.read<AlertService>().createAlert(type, desc.text.trim(), _center.latitude, _center.longitude, photoUrl: photoUrl);
                       if (mounted && ok != null) {
                         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Alerta reportada!'), backgroundColor: AppTheme.success));
                         context.read<AlertService>().fetchNearby(_center.latitude, _center.longitude);
@@ -958,7 +970,20 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                     },
                     child: const Text('Reportar'),
                   ),
+                )),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 52, height: 52,
+                  child: IconButton(
+                    onPressed: () async {
+                      final photo = await _picker.pickImage(source: ImageSource.camera, imageQuality: 70);
+                      if (photo != null) setSt(() => photoFile = photo);
+                    },
+                    icon: Icon(photoFile != null ? Icons.check_circle : Icons.camera_alt, color: photoFile != null ? AppTheme.success : AppTheme.primary),
+                    style: IconButton.styleFrom(backgroundColor: AppTheme.card),
+                  ),
                 ),
+              ]),
               ],
             ),
           ),
@@ -1104,6 +1129,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             ]),
             const SizedBox(height: 16),
             Text(a.description, style: const TextStyle(fontSize: 16)),
+            if (a.photoUrl != null) ...[
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.network(a.photoUrl!, fit: BoxFit.cover, width: double.infinity, height: 180),
+              ),
+            ],
             const SizedBox(height: 16),
             Row(children: [
               Icon(Icons.verified, size: 18, color: a.verifiedCount > 0 ? AppTheme.success : Colors.grey),
@@ -1112,6 +1144,26 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               const Spacer(),
               Text(_fmtDate(a.createdAt), style: TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
             ]),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              height: 44,
+              child: OutlinedButton.icon(
+                onPressed: () async {
+                  final ok = await context.read<AlertService>().verifyAlert(a.id);
+                  if (mounted && ok) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Verificacion registrada!'), backgroundColor: AppTheme.success));
+                  }
+                },
+                icon: const Icon(Icons.verified, size: 18),
+                label: const Text('Yo tambien lo vi'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.success,
+                  side: const BorderSide(color: AppTheme.success),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ),
             const SizedBox(height: 12),
           ],
         ),

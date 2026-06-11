@@ -2,18 +2,40 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../config/theme.dart';
 import '../services/auth_service.dart';
+import '../services/user_settings_service.dart';
 
-class ProfileScreen extends StatelessWidget {
+class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
 
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  Color _dotColor = AppTheme.blue;
+
+  @override
+  void initState() {
+    super.initState();
+    UserSettingsService.getDotColor().then((c) {
+      if (mounted) setState(() => _dotColor = c);
+    });
+  }
+
   String get _displayName {
-    final user = AuthService().user;
+    final user = context.read<AuthService>().user;
     final meta = user?.userMetadata;
     return meta?['display_name'] ?? meta?['full_name'] ?? user?.email?.split('@').first ?? 'Rider';
   }
 
-  String get _email => AuthService().user?.email ?? '';
+  String get _email => context.read<AuthService>().user?.email ?? '';
   bool get _isPremium => true;
+
+  static const _dotColors = [
+    Color(0xFF42A5F5), Color(0xFFFC4C02), Color(0xFF4CAF50),
+    Color(0xFFFFA726), Color(0xFFE53935), Color(0xFFAB47BC),
+    Color(0xFF00BCD4), Color(0xFFFFFFFF),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -98,7 +120,36 @@ class ProfileScreen extends StatelessWidget {
           const SizedBox(height: 24),
           _sectionTitle('Configuracion'),
           const SizedBox(height: 8),
-          _menuCard(Icons.info_outline, 'Acerca de RideChile', 'Version 1.0.0', () {}),
+          _menuCard(Icons.color_lens, 'Color de mi punto en el mapa', 'Personaliza como te ven los demas', () {}),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Wrap(
+              spacing: 10,
+              children: _dotColors.map((c) => GestureDetector(
+                onTap: () {
+                  setState(() => _dotColor = c);
+                  UserSettingsService.setDotColor(c);
+                },
+                child: Container(
+                  width: 36, height: 36,
+                  decoration: BoxDecoration(
+                    color: c,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: _dotColor.toARGB32() == c.toARGB32() ? Colors.white : Colors.transparent,
+                      width: 3,
+                    ),
+                    boxShadow: _dotColor.toARGB32() == c.toARGB32()
+                        ? [BoxShadow(color: c.withValues(alpha: 0.5), blurRadius: 8)]
+                        : null,
+                  ),
+                ),
+              )).toList(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          _menuCard(Icons.info_outline, 'Acerca de MRIDER', 'Version 1.0.0', () {}),
           _menuCard(Icons.help_outline, 'Ayuda y Soporte', 'Contactanos', () {}),
           const SizedBox(height: 24),
           SizedBox(

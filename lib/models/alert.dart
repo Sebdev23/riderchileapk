@@ -4,6 +4,7 @@ class Alert {
   final String description;
   final bool active;
   final int verifiedCount;
+  final String? photoUrl;
   final double lat;
   final double lon;
   final DateTime createdAt;
@@ -15,6 +16,7 @@ class Alert {
     required this.description,
     required this.active,
     required this.verifiedCount,
+    this.photoUrl,
     required this.lat,
     required this.lon,
     required this.createdAt,
@@ -28,6 +30,7 @@ class Alert {
       description: json['description'],
       active: json['active'],
       verifiedCount: json['verified_count'] ?? 0,
+      photoUrl: json['photo_url'],
       lat: (json['lat'] as num).toDouble(),
       lon: (json['lon'] as num).toDouble(),
       createdAt: DateTime.parse(json['created_at']),
